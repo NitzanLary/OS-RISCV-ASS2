@@ -6,8 +6,6 @@
 #include "proc.h"
 #include "defs.h"
 
-// check
-
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
@@ -19,6 +17,7 @@ struct spinlock pid_lock;
 
 extern void forkret(void);
 static void freeproc(struct proc *p);
+extern uint64 cas(volatile void *addr, int expected, int newval);
 
 extern char trampoline[]; // trampoline.S
 
@@ -87,15 +86,37 @@ myproc(void) {
   return p;
 }
 
+// int
+// allocpid() {
+//   int pid;
+  
+//   acquire(&pid_lock);
+//   pid = nextpid;
+//   nextpid = nextpid + 1;
+//   release(&pid_lock);
+
+//   return pid;
+// }
+
+// int
+// allocpid() {
+//   int pid;
+//   // int x;
+//   // pid = nextpid;
+//   // for (int i = 0; i < 50000; i++)
+//   // {
+//   //   x++;
+//   // }
+//   // nextpid++;
+
+
 int
 allocpid() {
   int pid;
+  do{
+    pid = nextpid;
+  } while (cas(&nextpid, pid, pid+1));
   
-  acquire(&pid_lock);
-  pid = nextpid;
-  nextpid = nextpid + 1;
-  release(&pid_lock);
-
   return pid;
 }
 
