@@ -1,13 +1,14 @@
 #include "kernel/types.h"
 #include "kernel/stat.h"
 #include "user/user.h"
+#include "kernel/proc.h"
+
 
 int
-main(int argc, char *argv[])
-{
+t1(){
     // int pids[64];
     // int f_pid = getpid();
-    int n_forks = 7;
+    int n_forks = 6;
     for(int i = 0; i < n_forks; i++){
         fork();
 
@@ -25,11 +26,24 @@ main(int argc, char *argv[])
     // {
     //     printf("_");
     // }
-    if (getpid() > 120)
+    if (getpid() > 60)
     {
         printf("%d ", getpid() % 10);
     }
-    
-    
+}
+
+int t2(){
+    struct proc_ll q = {-1, -1};
+    int n_forks = 2;
+    for (int i=0; i < n_forks; i++){
+        enque(&q, getpid());
+        fork();
+    }
+}
+
+int
+main(int argc, char *argv[])
+{
+    t2();
     exit(0);
 }

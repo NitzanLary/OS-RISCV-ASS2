@@ -105,4 +105,18 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  // our code:
+  int nextNodeIndex;
+  int prevNodeIndex;
 };
+
+struct proc_ll {
+  int head;                    // insert into head
+  int tail;                    // extract from tail
+  struct spinlock ht_lock;     // should be aquired every touch of tail of head
+}
+
+int enque(struct proc_ll* queue, int insertion);
+
+int deque(struct proc_ll* queue);
