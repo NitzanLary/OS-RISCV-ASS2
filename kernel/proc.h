@@ -114,9 +114,12 @@ struct proc {
 struct proc_ll {
   int head;                    // insert into head
   int tail;                    // extract from tail
-  struct spinlock ht_lock;     // should be aquired every touch of tail of head
-}
+  struct spinlock h_lock;     
+  struct spinlock t_lock;
+};
 
 int enque(struct proc_ll* queue, int insertion);
 
 int deque(struct proc_ll* queue);
+
+int remove(struct proc_ll* queue, int node);

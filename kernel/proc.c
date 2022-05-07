@@ -101,14 +101,11 @@ myproc(void) {
 // int
 // allocpid() {
 //   int pid;
-//   // int x;
-//   // pid = nextpid;
-//   // for (int i = 0; i < 50000; i++)
-//   // {
-//   //   x++;
-//   // }
-//   // nextpid++;
-
+//   pid = nextpid;
+//   for (int i = 0; i < 50000; i++);
+//   nextpid++;
+//   return pid;
+// }
 
 int
 allocpid() {
@@ -676,4 +673,161 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+// // bad case: insertion = 1, head = tail = 2
+// // right after the cas:
+// // head = 1 -> 2 = tail
+// // then another process deque: take 2 and set tail to -1
+// // head = 1 = tail but prev_head = 2
+
+// int enque(struct proc_ll* queue, int insertion){
+//   int previous_head;                                            
+//   do{                                                           // q.head = x -> ... -> -1
+//     previous_head = queue->head;                                // previous_head = x
+//   } while (cas(&queue->head, previous_head, insertion));        // q.head = insertion -> -1
+
+//   proc[insertion].nextNodeIndex = previous_head;                // insertion -> x -> ... -> -1
+
+//   if (previous_head == -1){                                     // only the first inserted head apply
+//     if (!cas(&queue->tail, -1, insertion)){                     // if q is empty: tail = insertion; return
+//       return 0;
+//     }
+//   }
+
+//   acquire(&proc[previous_head].lock);
+//   proc[previous_head].prevNodeIndex = insertion;                // insertion <- x <- ... <- tail
+//   release(&proc[previous_head].lock);
+
+//   return 0;
+// }
+
+// int deque(struct proc_ll* queue){
+//   int previous_tail;
+//   int current_tail;
+//   do{
+//     previous_tail = queue->tail;
+//   } while (cas(&queue->tail, previous_tail, proc[previous_tail].prevNodeIndex));
+
+//   if (previous_tail == -1){
+//     return -1;
+//   }
+
+//   current_tail = proc[previous_tail].prevNodeIndex;
+//   proc[current_tail].nextNodeIndex = -1;
+//   proc[previous_tail].prevNodeIndex = -1;
+//   proc[previous_tail].nextNodeIndex = -1;
+//   return previous_tail;
+// }
+
+
+int enque(struct proc_ll* queue, int insertion){
+  acquire(&queue->h_lock);
+  int previous_head = queue->head;
+  proc[insertion].prevNodeIndex = queue->head;
+  queue->head = insertion;
+  proc[insertion].nextNodeIndex = previous_head;                // insertion -> x -> ... -> -1
+  
+
+  if (previous_head < 0){                                     // only the first inserted head apply
+    acquire(&queue->t_lock);
+    queue->tail = insertion;
+    release(&queue->t_lock);
+  }
+  else{
+    acquire(&proc[previous_head].lock);
+    proc[previous_head].prevNodeIndex = insertion;                // insertion <- x <- ... <- tail
+    release(&proc[previous_head].lock);
+  }
+  release(&queue->h_lock);
+  return 0;
+}
+
+int deque(struct proc_ll* queue){
+  int prev_tail;
+  int new_tail;
+  struct spinlock* new_tail_lock;
+
+  while(1){
+    prev_tail = queue->tail;
+    if (prev_tail < 0){
+      return prev_tail;
+    }else{
+      new_tail = proc[prev_tail].prevNodeIndex;
+      if (new_tail < 0){
+        new_tail_lock = &queue->h_lock;
+      }
+      else{
+        new_tail_lock = &proc[new_tail].lock;
+      }
+      acquire(new_tail_lock);
+      if (proc[prev_tail].prevNodeIndex == new_tail){ // then first acquire ok
+
+        acquire(&proc[prev_tail].lock);
+        acquire(&queue->t_lock);
+        if (queue->tail == prev_tail){  // then second and tail acquire ok
+          break;
+        }else{
+          release(&queue->t_lock);
+          release(&proc[prev_tail].lock);
+          continue;
+        }
+      }else{
+        release(new_tail_lock);
+        continue;
+      }
+    }
+  }
+  queue->tail = new_tail;
+  if (new_tail < 0){
+    queue->head = queue->tail;
+  }else{
+    proc[new_tail].nextNodeIndex = queue->tail;
+  }
+  proc[prev_tail].nextNodeIndex = -100;
+  proc[prev_tail].prevNodeIndex = -100;
+  
+
+  release(&queue->t_lock);
+  release(&proc[prev_tail].lock);
+  release(new_tail_lock);
+
+  return prev_tail;
+}
+
+int remove(struct proc_ll* queue, int node){
+  while(1){
+    if (proc[node].prevNodeIndex < 0){
+      acquire(&queue->h_lock);
+      if(queue->head == node){
+        queue->head = proc[node].nextNodeIndex;
+        break;
+      }else{
+        release(&queue->h_lock);
+      }
+    }else{
+      acquire(&proc[proc[node].prevNodeIndex].lock);
+      if (proc[proc[node].prevNodeIndex].nextNodeIndex == node){
+        proc[proc[node].prevNodeIndex].nextNodeIndex = proc[node].nextNodeIndex;
+        break;
+      }else{
+        release(&proc[proc[node].prevNodeIndex].lock);
+      }
+    }
+  }
+
+  if (proc[node].nextNodeIndex < 0){
+    acquire(&queue->t_lock);
+    queue->tail = proc[node].prevNodeIndex;
+    release(&queue->t_lock);
+    
+  }else{
+    acquire(&proc[proc[node].nextNodeIndex].lock);
+    proc[proc[node].nextNodeIndex].prevNodeIndex = proc[node].prevNodeIndex;
+    release(&proc[proc[node].nextNodeIndex].lock);
+  }
+
+  proc[node].nextNodeIndex = -100;
+  proc[node].prevNodeIndex = -100;
+  return node;
 }
