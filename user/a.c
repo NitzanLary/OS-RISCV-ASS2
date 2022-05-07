@@ -15,6 +15,7 @@ main(int argc, char *argv[])
 
     // pids[getpid() - 2] = 1;
     wait(0);
+    ////pushpush?
     // if(getpid() == f_pid){
     //     for (int i = 0; i < 64; i++){
     //         printf("%d  ", pids[i]);
