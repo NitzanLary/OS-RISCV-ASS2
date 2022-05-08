@@ -18,12 +18,22 @@ struct context {
   uint64 s11;
 };
 
+struct proc_ll {
+  int head;                    // insert into head
+  int tail;                    // extract from tail
+  struct spinlock h_lock;     
+  struct spinlock t_lock;
+};
+
 // Per-CPU state.
 struct cpu {
   struct proc *proc;          // The process running on this cpu, or null.
   struct context context;     // swtch() here to enter scheduler().
   int noff;                   // Depth of push_off() nesting.
   int intena;                 // Were interrupts enabled before push_off()?
+
+  // our code:
+  struct proc_ll cpu_runnables;
 };
 
 extern struct cpu cpus[NCPU];
@@ -109,13 +119,9 @@ struct proc {
   // our code:
   int nextNodeIndex;
   int prevNodeIndex;
-};
+  struct spinlock node_lock;
 
-struct proc_ll {
-  int head;                    // insert into head
-  int tail;                    // extract from tail
-  struct spinlock h_lock;     
-  struct spinlock t_lock;
+  int cpu_number;
 };
 
 int enque(struct proc_ll* queue, int insertion);

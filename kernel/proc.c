@@ -27,6 +27,11 @@ extern char trampoline[]; // trampoline.S
 // must be acquired before any p->lock.
 struct spinlock wait_lock;
 
+// our code:
+struct proc_ll sleeping_procs;
+struct proc_ll zombie_procs;
+struct proc_ll unused_entrys; 
+
 // Allocate a page for each process's kernel stack.
 // Map it high in memory, followed by an invalid
 // guard page.
@@ -43,6 +48,14 @@ proc_mapstacks(pagetable_t kpgtbl) {
   }
 }
 
+void
+initlist(struct proc_ll* lst, int index){
+  lst->head = (index + 1 ) * -1;
+  lst->tail = (index + 1 ) * -1;
+  initlock(&lst->h_lock, "h_lock");
+  initlock(&lst->t_lock, "t_lock");
+}
+
 // initialize the proc table at boot time.
 void
 procinit(void)
@@ -51,9 +64,19 @@ procinit(void)
   
   initlock(&pid_lock, "nextpid");
   initlock(&wait_lock, "wait_lock");
+
+  initlist(&unused_entrys, UNUSED);
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
+      initlock(&p->node_lock, "proc_node_lock");
       p->kstack = KSTACK((int) (p - proc));
+      
+      enque(&unused_entrys, (p - proc) / sizeof(struct proc));
+  }
+
+  struct cpu *c;
+  for(c = cpus; c < &cpus[NCPU]; c++){
+    initlist(&c->cpu_runnables, 10 + ((c - cpus) / sizeof(struct cpu)));
   }
 }
 
@@ -723,6 +746,7 @@ procdump(void)
 
 int enque(struct proc_ll* queue, int insertion){
   acquire(&queue->h_lock);
+  acquire(&proc[insertion].node_lock);
   int previous_head = queue->head;
   proc[insertion].prevNodeIndex = queue->head;
   queue->head = insertion;
@@ -735,10 +759,11 @@ int enque(struct proc_ll* queue, int insertion){
     release(&queue->t_lock);
   }
   else{
-    acquire(&proc[previous_head].lock);
+    acquire(&proc[previous_head].node_lock);
     proc[previous_head].prevNodeIndex = insertion;                // insertion <- x <- ... <- tail
-    release(&proc[previous_head].lock);
+    release(&proc[previous_head].node_lock);
   }
+  release(&proc[insertion].node_lock);
   release(&queue->h_lock);
   return 0;
 }
@@ -758,18 +783,18 @@ int deque(struct proc_ll* queue){
         new_tail_lock = &queue->h_lock;
       }
       else{
-        new_tail_lock = &proc[new_tail].lock;
+        new_tail_lock = &proc[new_tail].node_lock;
       }
       acquire(new_tail_lock);
       if (proc[prev_tail].prevNodeIndex == new_tail){ // then first acquire ok
 
-        acquire(&proc[prev_tail].lock);
+        acquire(&proc[prev_tail].node_lock);
         acquire(&queue->t_lock);
         if (queue->tail == prev_tail){  // then second and tail acquire ok
           break;
         }else{
           release(&queue->t_lock);
-          release(&proc[prev_tail].lock);
+          release(&proc[prev_tail].node_lock);
           continue;
         }
       }else{
@@ -789,7 +814,7 @@ int deque(struct proc_ll* queue){
   
 
   release(&queue->t_lock);
-  release(&proc[prev_tail].lock);
+  release(&proc[prev_tail].node_lock);
   release(new_tail_lock);
 
   return prev_tail;
@@ -806,15 +831,16 @@ int remove(struct proc_ll* queue, int node){
         release(&queue->h_lock);
       }
     }else{
-      acquire(&proc[proc[node].prevNodeIndex].lock);
+      acquire(&proc[proc[node].prevNodeIndex].node_lock);
       if (proc[proc[node].prevNodeIndex].nextNodeIndex == node){
         proc[proc[node].prevNodeIndex].nextNodeIndex = proc[node].nextNodeIndex;
         break;
       }else{
-        release(&proc[proc[node].prevNodeIndex].lock);
+        release(&proc[proc[node].prevNodeIndex].node_lock);
       }
     }
   }
+  acquire(&proc[node].node_lock);
 
   if (proc[node].nextNodeIndex < 0){
     acquire(&queue->t_lock);
@@ -822,12 +848,14 @@ int remove(struct proc_ll* queue, int node){
     release(&queue->t_lock);
     
   }else{
-    acquire(&proc[proc[node].nextNodeIndex].lock);
+    acquire(&proc[proc[node].nextNodeIndex].node_lock);
     proc[proc[node].nextNodeIndex].prevNodeIndex = proc[node].prevNodeIndex;
-    release(&proc[proc[node].nextNodeIndex].lock);
+    release(&proc[proc[node].nextNodeIndex].node_lock);
   }
 
   proc[node].nextNodeIndex = -100;
   proc[node].prevNodeIndex = -100;
+
+  release(&proc[node].node_lock);
   return node;
 }
