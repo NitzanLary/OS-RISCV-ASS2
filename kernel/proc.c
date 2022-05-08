@@ -50,10 +50,21 @@ proc_mapstacks(pagetable_t kpgtbl) {
 
 void
 initlist(struct proc_ll* lst, int index){
-  lst->head = (index + 1 ) * -1;
-  lst->tail = (index + 1 ) * -1;
+  lst->head = (index + 1) * -1;
+  lst->tail = (index + 1) * -1;
   initlock(&lst->h_lock, "h_lock");
   initlock(&lst->t_lock, "t_lock");
+}
+
+int
+printq(struct proc_ll* queue){
+  int cur = queue->head;
+  while (cur >= 0){
+    printf("%d->", cur);
+    cur = proc[cur].nextNodeIndex;
+  }
+  printf("\n");
+  return 0;
 }
 
 // initialize the proc table at boot time.
@@ -66,13 +77,24 @@ procinit(void)
   initlock(&wait_lock, "wait_lock");
 
   initlist(&unused_entrys, UNUSED);
+  // printf("%d\n", unused_entrys.head);
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
       initlock(&p->node_lock, "proc_node_lock");
       p->kstack = KSTACK((int) (p - proc));
       
-      enque(&unused_entrys, (p - proc) / sizeof(struct proc));
+      // printf("0-%d\n", (p - proc) / sizeof(struct proc));
+      // printf("1-%d\n", (p - proc));
+      // printf("1.5-%d\n", p);
+      // printf("2-%d\n", sizeof(struct proc));
+      // printf("\n");
+      enque(&unused_entrys, p - proc);
   }
+  // printf("%d\n", unused_entrys.head);
+  // printq(&unused_entrys);
+
+  // printf("dec %d\n", remove(&unused_entrys, 42));
+  // printq(&unused_entrys);
 
   struct cpu *c;
   for(c = cpus; c < &cpus[NCPU]; c++){
@@ -747,115 +769,73 @@ procdump(void)
 int enque(struct proc_ll* queue, int insertion){
   acquire(&queue->h_lock);
   acquire(&proc[insertion].node_lock);
-  int previous_head = queue->head;
-  proc[insertion].prevNodeIndex = queue->head;
+  proc[insertion].nextNodeIndex = queue->head;
   queue->head = insertion;
-  proc[insertion].nextNodeIndex = previous_head;                // insertion -> x -> ... -> -1
-  
-
-  if (previous_head < 0){                                     // only the first inserted head apply
-    acquire(&queue->t_lock);
-    queue->tail = insertion;
-    release(&queue->t_lock);
-  }
-  else{
-    acquire(&proc[previous_head].node_lock);
-    proc[previous_head].prevNodeIndex = insertion;                // insertion <- x <- ... <- tail
-    release(&proc[previous_head].node_lock);
-  }
   release(&proc[insertion].node_lock);
   release(&queue->h_lock);
   return 0;
 }
 
 int deque(struct proc_ll* queue){
-  int prev_tail;
-  int new_tail;
-  struct spinlock* new_tail_lock;
-
-  while(1){
-    prev_tail = queue->tail;
-    if (prev_tail < 0){
-      return prev_tail;
-    }else{
-      new_tail = proc[prev_tail].prevNodeIndex;
-      if (new_tail < 0){
-        new_tail_lock = &queue->h_lock;
-      }
-      else{
-        new_tail_lock = &proc[new_tail].node_lock;
-      }
-      acquire(new_tail_lock);
-      if (proc[prev_tail].prevNodeIndex == new_tail){ // then first acquire ok
-
-        acquire(&proc[prev_tail].node_lock);
-        acquire(&queue->t_lock);
-        if (queue->tail == prev_tail){  // then second and tail acquire ok
-          break;
-        }else{
-          release(&queue->t_lock);
-          release(&proc[prev_tail].node_lock);
-          continue;
-        }
-      }else{
-        release(new_tail_lock);
-        continue;
-      }
-    }
+  int prev;
+  int cur;
+  struct spinlock* prevlock;
+  struct spinlock* curlock;
+  prevlock = &queue->h_lock;
+  acquire(prevlock);
+  if (queue->head < 0){
+    release(prevlock);
+    return -1;
   }
-  queue->tail = new_tail;
-  if (new_tail < 0){
-    queue->head = queue->tail;
+  cur = queue->head;
+  curlock = &proc[cur].node_lock;
+  prev = -1;
+  acquire(curlock);
+  while(proc[cur].nextNodeIndex >= 0){
+    release(prevlock);
+    prevlock = curlock;
+    prev = cur;
+    cur = proc[cur].nextNodeIndex;
+    curlock = &proc[cur].node_lock;
+    acquire(curlock);  
+  }
+  if (prev < 0){ // then only 1 element in the list
+    queue->head = proc[cur].nextNodeIndex;
   }else{
-    proc[new_tail].nextNodeIndex = queue->tail;
+    proc[prev].nextNodeIndex = proc[cur].nextNodeIndex;
   }
-  proc[prev_tail].nextNodeIndex = -100;
-  proc[prev_tail].prevNodeIndex = -100;
-  
-
-  release(&queue->t_lock);
-  release(&proc[prev_tail].node_lock);
-  release(new_tail_lock);
-
-  return prev_tail;
+  proc[cur].nextNodeIndex = -1000;
+  release(prevlock);
+  release(curlock);
+  return cur;
 }
 
 int remove(struct proc_ll* queue, int node){
-  while(1){
-    if (proc[node].prevNodeIndex < 0){
-      acquire(&queue->h_lock);
-      if(queue->head == node){
-        queue->head = proc[node].nextNodeIndex;
-        break;
+  int prev;
+  int cur;
+  struct spinlock* lastlock;
+  lastlock = &queue->h_lock;
+  acquire(lastlock);
+  prev = -1;
+  cur = queue->head;
+  while(cur >= 0){
+    acquire(&proc[cur].node_lock);
+    if (cur == node){
+      if (prev < 0){ // then remove in the head
+        queue->head = proc[cur].nextNodeIndex;
       }else{
-        release(&queue->h_lock);
+        proc[prev].nextNodeIndex = proc[cur].nextNodeIndex;
       }
-    }else{
-      acquire(&proc[proc[node].prevNodeIndex].node_lock);
-      if (proc[proc[node].prevNodeIndex].nextNodeIndex == node){
-        proc[proc[node].prevNodeIndex].nextNodeIndex = proc[node].nextNodeIndex;
-        break;
-      }else{
-        release(&proc[proc[node].prevNodeIndex].node_lock);
-      }
+      proc[cur].nextNodeIndex = -1000;
+      release(&proc[cur].node_lock);
+      release(lastlock);
+      return node;
     }
+    release(lastlock);
+    lastlock = &proc[cur].node_lock;
+    prev = cur;
+    cur = proc[cur].nextNodeIndex;    
   }
-  acquire(&proc[node].node_lock);
-
-  if (proc[node].nextNodeIndex < 0){
-    acquire(&queue->t_lock);
-    queue->tail = proc[node].prevNodeIndex;
-    release(&queue->t_lock);
-    
-  }else{
-    acquire(&proc[proc[node].nextNodeIndex].node_lock);
-    proc[proc[node].nextNodeIndex].prevNodeIndex = proc[node].prevNodeIndex;
-    release(&proc[proc[node].nextNodeIndex].node_lock);
-  }
-
-  proc[node].nextNodeIndex = -100;
-  proc[node].prevNodeIndex = -100;
-
-  release(&proc[node].node_lock);
-  return node;
+  release(lastlock);
+  return -1;
 }
