@@ -34,6 +34,7 @@ struct cpu {
 
   // our code:
   struct proc_ll cpu_runnables;
+  uint64 proc_counter;
 };
 
 extern struct cpu cpus[NCPU];

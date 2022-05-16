@@ -23,7 +23,11 @@ acquire(struct spinlock *lk)
 {
   push_off(); // disable interrupts to avoid deadlock.
   if(holding(lk)){
-    printf("%s\n", lk->name);
+    // char* cur = lk->name;
+    // while(cur){
+    //   printf(cur);
+    // }
+    printf(lk->name);
     panic("acquire");
   }
     

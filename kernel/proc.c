@@ -19,6 +19,8 @@ extern void forkret(void);
 static void freeproc(struct proc *p);
 extern uint64 cas(volatile void *addr, int expected, int newval);
 
+int remove_all_sleeping_on_channel(void* channel);
+
 extern char trampoline[]; // trampoline.S
 
 // helps ensure that wakeups of wait()ing
@@ -31,6 +33,27 @@ struct spinlock wait_lock;
 struct proc_ll sleeping_procs;
 struct proc_ll zombie_procs;
 struct proc_ll unused_entrys; 
+
+int get_the_least_used_cpu_and_increase_its_counter(){
+  struct cpu* least_used_cpu = cpus;
+  uint64 cur_least = least_used_cpu->proc_counter;
+
+  for (struct cpu* c = cpus; c < &cpus[NCPU]; c++){
+    if (c->proc_counter == 0){
+      continue;
+    }
+    if (cur_least == -1 || c->proc_counter < cur_least){
+      least_used_cpu = c;
+      cur_least = c->proc_counter;
+    }
+  }
+  uint64 prev;
+  do{
+    prev = least_used_cpu->proc_counter;
+  }while(cas(&least_used_cpu->proc_counter, prev, prev + 1));
+
+  return least_used_cpu - cpus;
+}
 
 // Allocate a page for each process's kernel stack.
 // Map it high in memory, followed by an invalid
@@ -77,9 +100,14 @@ procinit(void)
   initlock(&wait_lock, "wait_lock");
 
   initlist(&unused_entrys, UNUSED);
+  initlist(&sleeping_procs, SLEEPING);
+  initlist(&zombie_procs, ZOMBIE);
   // printf("%d\n", unused_entrys.head);
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
+      // char pname = (int)(p - proc) + '0';
+      // char lock_name[17] = {'p','r','o','c','_','n','o','d','e','_','l','o','c','k',' ', pname, 0};
+      // char* lock_name = "proc_node_lock ", pname;
       initlock(&p->node_lock, "proc_node_lock");
       p->kstack = KSTACK((int) (p - proc));
       
@@ -98,7 +126,7 @@ procinit(void)
 
   struct cpu *c;
   for(c = cpus; c < &cpus[NCPU]; c++){
-    initlist(&c->cpu_runnables, 10 + ((c - cpus) / sizeof(struct cpu)));
+    initlist(&c->cpu_runnables, 10 + (c - cpus));
   }
 }
 
@@ -170,18 +198,24 @@ static struct proc*
 allocproc(void)
 {
   struct proc *p;
-
-  for(p = proc; p < &proc[NPROC]; p++) {
-    acquire(&p->lock);
-    if(p->state == UNUSED) {
-      goto found;
-    } else {
-      release(&p->lock);
-    }
+  int proc_table_unused_idx;
+  if ((proc_table_unused_idx = deque(&unused_entrys)) < 0){
+    return 0;
   }
-  return 0;
+  p = &proc[proc_table_unused_idx];
+  acquire(&p->lock);
 
-found:
+//   for(p = proc; p < &proc[NPROC]; p++) {
+//     acquire(&p->lock);
+//     if(p->state == UNUSED) {
+//       goto found;
+//     } else {
+//       release(&p->lock);
+//     }
+//   }
+//   return 0;
+
+// found:
   p->pid = allocpid();
   p->state = USED;
 
@@ -229,6 +263,11 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  if (remove(&zombie_procs, p - proc) < 0)
+    panic("ahhhhhhhhh removeeeeee");
+  enque(&unused_entrys, p - proc);
+
+  
 }
 
 // Create a user page table for a given process,
@@ -291,9 +330,12 @@ void
 userinit(void)
 {
   struct proc *p;
+  int proc_idx;
 
   p = allocproc();
   initproc = p;
+  struct cpu* first_cpu = cpus;
+  
   
   // allocate one user page and copy init's instructions
   // and data into it.
@@ -308,6 +350,9 @@ userinit(void)
   p->cwd = namei("/");
 
   p->state = RUNNABLE;
+  proc_idx = p - proc;
+  enque(&first_cpu->cpu_runnables, proc_idx);
+  p->cpu_number = first_cpu - cpus;
 
   release(&p->lock);
 }
@@ -377,7 +422,9 @@ fork(void)
   release(&wait_lock);
 
   acquire(&np->lock);
+  np->cpu_number = get_the_least_used_cpu_and_increase_its_counter();
   np->state = RUNNABLE;
+  enque(&cpus[np->cpu_number].cpu_runnables, np - proc);
   release(&np->lock);
 
   return pid;
@@ -435,6 +482,7 @@ exit(int status)
 
   p->xstate = status;
   p->state = ZOMBIE;
+  enque(&zombie_procs, p - proc);
 
   release(&wait_lock);
 
@@ -504,26 +552,33 @@ scheduler(void)
 {
   struct proc *p;
   struct cpu *c = mycpu();
+  if (c->proc_counter == 0){
+    c->proc_counter = 1;
+  }
   
   c->proc = 0;
   for(;;){
     // Avoid deadlock by ensuring that devices can interrupt.
     intr_on();
+    int next_to_run;
+    if ((next_to_run = deque(&c->cpu_runnables)) >= 0){
+      p = &proc[next_to_run];
+    
 
-    for(p = proc; p < &proc[NPROC]; p++) {
+    // for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
-      if(p->state == RUNNABLE) {
+      // if(p->state == RUNNABLE) {
         // Switch to chosen process.  It is the process's job
         // to release its lock and then reacquire it
         // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
+      p->state = RUNNING;
+      c->proc = p;
+      swtch(&c->context, &p->context);
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
-        c->proc = 0;
-      }
+      c->proc = 0;
+      // }
       release(&p->lock);
     }
   }
@@ -563,6 +618,7 @@ yield(void)
   struct proc *p = myproc();
   acquire(&p->lock);
   p->state = RUNNABLE;
+  enque(&cpus[p->cpu_number].cpu_runnables, p - proc);
   sched();
   release(&p->lock);
 }
@@ -608,6 +664,7 @@ sleep(void *chan, struct spinlock *lk)
   // Go to sleep.
   p->chan = chan;
   p->state = SLEEPING;
+  enque(&sleeping_procs, p - proc);
 
   sched();
 
@@ -624,17 +681,21 @@ sleep(void *chan, struct spinlock *lk)
 void
 wakeup(void *chan)
 {
-  struct proc *p;
+  // printf("w%d\n", cpuid());
+  // struct proc *p;
 
-  for(p = proc; p < &proc[NPROC]; p++) {
-    if(p != myproc()){
-      acquire(&p->lock);
-      if(p->state == SLEEPING && p->chan == chan) {
-        p->state = RUNNABLE;
-      }
-      release(&p->lock);
-    }
-  }
+  // for(p = proc; p < &proc[NPROC]; p++) {
+  //   if(p != myproc()){
+  //     acquire(&p->lock);
+  //     if(p->state == SLEEPING && p->chan == chan) {
+  //       p->state = RUNNABLE;
+  //     }
+  //     release(&p->lock);
+  //   }
+  // }
+
+  remove_all_sleeping_on_channel(chan);
+  
 }
 
 // Kill the process with the given pid.
@@ -767,6 +828,7 @@ procdump(void)
 
 
 int enque(struct proc_ll* queue, int insertion){
+  // printf("e%d\n", queue->tail);
   acquire(&queue->h_lock);
   acquire(&proc[insertion].node_lock);
   proc[insertion].nextNodeIndex = queue->head;
@@ -777,6 +839,7 @@ int enque(struct proc_ll* queue, int insertion){
 }
 
 int deque(struct proc_ll* queue){
+  // printf("d%d\n", queue->tail);
   int prev;
   int cur;
   struct spinlock* prevlock;
@@ -812,6 +875,7 @@ int deque(struct proc_ll* queue){
 
 int remove(struct proc_ll* queue, int node){
   int prev;
+  // printf("r%d\n", queue->tail);
   int cur;
   struct spinlock* lastlock;
   lastlock = &queue->h_lock;
@@ -838,4 +902,68 @@ int remove(struct proc_ll* queue, int node){
   }
   release(lastlock);
   return -1;
+}
+
+int remove_all_sleeping_on_channel(void* channel){
+  int prev;
+  int cur;
+  struct spinlock* lastlock;
+  struct proc_ll* queue = &sleeping_procs;
+  lastlock = &queue->h_lock;
+  acquire(lastlock);
+  prev = -1;
+  cur = queue->head;
+  while(cur >= 0){
+    acquire(&proc[cur].node_lock);
+    if (proc[cur].chan == channel){
+      int* prev_pointer;
+      if (prev < 0){ // then remove in the head
+        prev_pointer = &queue->head;
+        // queue->head = proc[cur].nextNodeIndex;
+      }else{
+        prev_pointer = &proc[prev].nextNodeIndex;
+        // proc[prev].nextNodeIndex = proc[cur].nextNodeIndex;
+      }
+      *prev_pointer = proc[cur].nextNodeIndex;
+      proc[cur].nextNodeIndex = -1000;
+      release(&proc[cur].node_lock);
+
+      // handle wakeup
+      acquire(&proc[cur].lock);
+      proc[cur].state = RUNNABLE;
+      proc[cur].cpu_number = get_the_least_used_cpu_and_increase_its_counter();
+      enque(&cpus[proc[cur].cpu_number].cpu_runnables, cur);
+      release(&proc[cur].lock);
+      //
+
+      cur = *prev_pointer;
+
+    }else{
+      release(lastlock);
+      lastlock = &proc[cur].node_lock;
+      prev = cur;
+      cur = proc[cur].nextNodeIndex;
+    }
+  }
+  release(lastlock);
+  return -1;
+}
+
+int
+set_cpu(int cpu_num)
+{
+  myproc()->cpu_number = cpu_num;
+  return myproc() - proc;
+}
+
+int
+get_cpu()
+{
+  return myproc()->cpu_number;
+}
+
+int
+cpu_process_count(int cpu_num)
+{
+  return cpus[cpu_num].proc_counter;
 }
